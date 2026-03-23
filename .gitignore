@@ -1,0 +1,19 @@
+# Go
+go-agent/go-agent
+
+# Environment
+.env
+
+# Runtime directories
+.tasks/
+.team/
+.transcripts/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
