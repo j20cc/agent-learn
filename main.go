@@ -254,6 +254,10 @@ func main() {
 	r.GET("/inbox", handleInbox)
 	r.POST("/compact", handleCompact)
 
+	// 静态文件服务
+	r.Static("/web", "./web")
+	r.GET("/", func(c *gin.Context) { c.Redirect(301, "/web/") })
+
 	port := getEnv("PORT", "8080")
 	slog.Info("server starting", "port", port)
 	if err := r.Run(":" + port); err != nil {
