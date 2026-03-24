@@ -567,9 +567,10 @@ async function send() {
     currentSession.messages.push({ type: 'error', text: e.message });
   }
 
-  // 清除 thinking
+  // 清除 thinking 指示器和临时 thinking 消息
   const t = document.getElementById('thinking');
   if (t) t.remove();
+  currentSession.messages = currentSession.messages.filter(m => m.type !== 'thinking');
 
   renderMessages();
   saveSessions();
