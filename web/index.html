@@ -221,22 +221,33 @@ body {
   gap: 6px;
   font-weight: 500;
   color: var(--orange);
-  border-bottom: 1px solid var(--border);
   font-family: 'JetBrains Mono', monospace;
   cursor: pointer;
   user-select: none;
+  transition: color 0.15s;
 }
 
+.tool-header:hover { color: var(--text); }
 .tool-header .icon { font-size: 14px; }
+
+.tool-header .arrow {
+  margin-left: auto;
+  font-size: 10px;
+  transition: transform 0.2s;
+  color: var(--text-dim);
+}
+
+.tool-header.expanded .arrow { transform: rotate(90deg); }
 
 .tool-body {
   padding: 10px 12px;
   font-family: 'JetBrains Mono', monospace;
   color: var(--text-dim);
-  max-height: 200px;
+  max-height: 300px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
+  border-top: 1px solid var(--border);
 }
 
 .tool-body.collapsed { display: none; }
@@ -428,23 +439,38 @@ function renderMessages() {
   el.scrollTop = el.scrollHeight;
 }
 
+function toggleTool(el) {
+  el.classList.toggle('expanded');
+  el.nextElementSibling.classList.toggle('collapsed');
+}
+
 function renderMsg(m) {
   switch (m.type) {
     case 'user':
       return `<div class="msg user">${escHtml(m.text)}</div>`;
     case 'message':
       return `<div class="msg ai">${formatText(m.text)}</div>`;
+    case 'thinking':
+      return `<div class="tool-block">
+        <div class="tool-header" onclick="toggleTool(this)" style="color:var(--text-dim)">
+          <span class="icon">💭</span> ${escHtml(m.step || '思考中')}
+          <span class="arrow">▶</span>
+        </div>
+        <div class="tool-body collapsed">${escHtml(m.detail || '')}</div>
+      </div>`;
     case 'tool_call':
       return `<div class="tool-block">
-        <div class="tool-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+        <div class="tool-header" onclick="toggleTool(this)">
           <span class="icon">🔧</span> ${escHtml(m.name)}
+          <span class="arrow">▶</span>
         </div>
-        <div class="tool-body">${escHtml(typeof m.args === 'string' ? m.args : JSON.stringify(m.args, null, 2))}</div>
+        <div class="tool-body collapsed">${escHtml(typeof m.args === 'string' ? m.args : JSON.stringify(m.args, null, 2))}</div>
       </div>`;
     case 'tool_result':
       return `<div class="tool-block">
-        <div class="tool-header" onclick="this.nextElementSibling.classList.toggle('collapsed')" style="color:var(--green)">
+        <div class="tool-header" onclick="toggleTool(this)" style="color:var(--green)">
           <span class="icon">✅</span> ${escHtml(m.name)} 结果
+          <span class="arrow">▶</span>
         </div>
         <div class="tool-body collapsed">${escHtml(m.result)}</div>
       </div>`;
@@ -554,30 +580,33 @@ async function send() {
 
 function handleEvent(event) {
   const t = document.getElementById('thinking');
+  const msgEl = document.getElementById('messages');
 
   switch (event.type) {
     case 'thinking':
+      currentSession.messages.push({ type: 'thinking', step: event.data?.step || '思考中' });
       if (t) t.innerHTML = `<div class="spinner"></div> ${escHtml(event.data?.step || '思考中...')}`;
+      renderMessages();
+      if (t) msgEl.appendChild(t);
+      msgEl.scrollTop = msgEl.scrollHeight;
       break;
     case 'tool_call':
       currentSession.messages.push({ type: 'tool_call', name: event.data?.name, args: event.data?.args });
       if (t) t.innerHTML = `<div class="spinner"></div> 执行 ${escHtml(event.data?.name)}...`;
       renderMessages();
-      // 重新追加 thinking
-      const msgEl1 = document.getElementById('messages');
-      if (t) msgEl1.appendChild(t);
-      msgEl1.scrollTop = msgEl1.scrollHeight;
+      if (t) msgEl.appendChild(t);
+      msgEl.scrollTop = msgEl.scrollHeight;
       break;
     case 'tool_result':
       currentSession.messages.push({ type: 'tool_result', name: event.data?.name, result: event.data?.result });
       renderMessages();
-      const msgEl2 = document.getElementById('messages');
-      if (t) msgEl2.appendChild(t);
-      msgEl2.scrollTop = msgEl2.scrollHeight;
+      if (t) msgEl.appendChild(t);
+      msgEl.scrollTop = msgEl.scrollHeight;
       break;
     case 'message':
       currentSession.messages.push({ type: 'message', text: event.data?.content });
       renderMessages();
+      msgEl.scrollTop = msgEl.scrollHeight;
       break;
     case 'error':
       currentSession.messages.push({ type: 'error', text: event.data?.error });
