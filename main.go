@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"sync"
 
+	"go-agent/tools"
+
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -41,6 +44,11 @@ var (
 	globalTeam    *TeammateManager
 
 	globalSystemPrompt string
+	toolRegistry       *tools.Registry
+
+	// 关机/计划审批状态
+	shutdownRequests = map[string]map[string]string{}
+	planRequests     = map[string]map[string]string{}
 
 	// 会话管理
 	sessions   = map[string]*Session{}
@@ -63,7 +71,6 @@ func getOrCreateSession(id string) *Session {
 
 func initConfig() {
 	godotenv.Load()
-
 	cfg = Config{
 		BaseURL:        getEnv("OPENAI_BASE_URL", "https://api.openai.com"),
 		APIKey:         getEnv("OPENAI_API_KEY", ""),
@@ -73,15 +80,9 @@ func initConfig() {
 		PollInterval:   5,
 		IdleTimeout:    60,
 	}
-
-	slog.Info("config loaded",
-		"base_url", cfg.BaseURL,
-		"model_id", cfg.ModelID,
-		"work_dir", cfg.WorkDir,
-	)
-
+	slog.Info("config loaded", "base_url", cfg.BaseURL, "model_id", cfg.ModelID, "work_dir", cfg.WorkDir)
 	if cfg.APIKey == "" {
-		slog.Warn("OPENAI_API_KEY is empty, LLM calls will fail")
+		slog.Warn("OPENAI_API_KEY is empty")
 	}
 }
 
@@ -96,32 +97,86 @@ func initGlobals() {
 	globalSystemPrompt = fmt.Sprintf(
 		"You are a coding agent at %s. Use tools to solve tasks.\n"+
 			"Prefer task_create/task_update/task_list for multi-step work. Use TodoWrite for short checklists.\n"+
-			"Use task for subagent delegation. Use load_skill for specialized knowledge.\n"+
-			"Skills: %s",
+			"Use task for subagent delegation. Use load_skill for specialized knowledge.\nSkills: %s",
 		cfg.WorkDir, globalSkills.Descriptions(),
 	)
 
-	slog.Info("globals initialized",
-		"skills", globalSkills.Descriptions(),
-		"system_prompt_len", len(globalSystemPrompt),
-	)
+	// 初始化工具注册表（把主包的管理器通过回调注入 tools 包）
+	toolRegistry = &tools.Registry{
+		WorkDir: cfg.WorkDir,
+
+		TodoUpdate: func(items json.RawMessage) string {
+			var todoItems []TodoItem
+			if err := json.Unmarshal(items, &todoItems); err != nil {
+				return fmt.Sprintf("Error: %v", err)
+			}
+			result, err := globalTodo.Update(todoItems)
+			if err != nil {
+				return fmt.Sprintf("Error: %v", err)
+			}
+			return result
+		},
+		RunSubagent:   runSubagent, // 定义在 agent.go
+		SkillLoad:     func(name string) string { return globalSkills.Load(name) },
+		BgRun:         func(cmd string, timeout int) string { return globalBg.Run(cmd, timeout) },
+		BgCheck:       func(taskID string) string { return globalBg.Check(taskID) },
+		TaskCreate:    func(subj, desc string) string { return globalTaskMgr.Create(subj, desc) },
+		TaskGet:       func(id int) string { return globalTaskMgr.Get(id) },
+		TaskUpdate:    func(id int, s string, bb, bl []int) string { return globalTaskMgr.Update(id, s, bb, bl) },
+		TaskList:      func() string { return globalTaskMgr.ListAll() },
+		TaskClaim:     func(id int, owner string) string { return globalTaskMgr.Claim(id, owner) },
+		SpawnTeammate: func(n, r, p string) string { return globalTeam.Spawn(n, r, p) },
+		ListTeammates: func() string { return globalTeam.ListAll() },
+		SendMessage: func(to, content, msgType string) string {
+			return globalBus.Send("lead", to, content, msgType, nil)
+		},
+		ReadInbox: func() string {
+			msgs := globalBus.ReadInbox("lead")
+			data, _ := json.MarshalIndent(msgs, "", "  ")
+			return string(data)
+		},
+		Broadcast: func(content string) string {
+			return globalBus.Broadcast("lead", content, globalTeam.MemberNames())
+		},
+		ShutdownRequest: func(teammate string) string {
+			reqID := uuid.New().String()[:8]
+			shutdownRequests[reqID] = map[string]string{"target": teammate, "status": "pending"}
+			globalBus.Send("lead", teammate, "Please shut down.", "shutdown_request", map[string]any{"request_id": reqID})
+			slog.Info("shutdown requested", "request_id", reqID, "teammate", teammate)
+			return fmt.Sprintf("Shutdown request %s sent to '%s'", reqID, teammate)
+		},
+		PlanApproval: func(requestID string, approve bool, feedback string) string {
+			req, ok := planRequests[requestID]
+			if !ok {
+				return fmt.Sprintf("Error: Unknown plan request_id '%s'", requestID)
+			}
+			status := "rejected"
+			if approve {
+				status = "approved"
+			}
+			req["status"] = status
+			globalBus.Send("lead", req["from"], feedback, "plan_approval_response",
+				map[string]any{"request_id": requestID, "approve": approve, "feedback": feedback})
+			return fmt.Sprintf("Plan %s for '%s'", status, req["from"])
+		},
+	}
+
+	slog.Info("globals initialized", "system_prompt_len", len(globalSystemPrompt))
 }
 
 // ---- HTTP 处理器 ----
 
-type ChatRequest struct {
+type ChatReq struct {
 	SessionID string `json:"session_id"`
 	Message   string `json:"message"`
 }
 
-// handleChat 处理聊天请求，返回 SSE 流
 func handleChat(c *gin.Context) {
-	var req ChatRequest
+	var req ChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": "invalid request: " + err.Error()})
 		return
 	}
-
 	if req.SessionID == "" {
 		req.SessionID = "default"
 	}
@@ -131,91 +186,57 @@ func handleChat(c *gin.Context) {
 	}
 
 	slog.Info("chat request", "session_id", req.SessionID, "message_len", len(req.Message))
-
 	session := getOrCreateSession(req.SessionID)
 
-	// 添加用户消息
 	session.mu.Lock()
 	session.Input = append(session.Input, InputItem{
-		Type: "message",
-		Role: "user",
-		Content: []ContentPart{
-			{Type: "input_text", Text: req.Message},
-		},
+		Type: "message", Role: "user",
+		Content: []ContentPart{{Type: "input_text", Text: req.Message}},
 	})
 	session.mu.Unlock()
 
-	// SSE 流
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// SSE 写入函数
 	sseWriter := func(event SSEEvent) {
 		data, _ := json.Marshal(event)
 		c.SSEvent(event.Type, string(data))
 		c.Writer.Flush()
 	}
 
-	// 运行 Agent 循环
 	AgentLoop(session, sseWriter)
-
-	// 发送完成事件
 	sseWriter(SSEEvent{Type: "done", Data: map[string]string{}})
 }
 
-// handleTasks 查看任务列表
-func handleTasks(c *gin.Context) {
-	c.JSON(200, gin.H{"tasks": globalTaskMgr.ListAll()})
-}
+func handleTasks(c *gin.Context)   { c.JSON(200, gin.H{"tasks": globalTaskMgr.ListAll()}) }
+func handleTeam(c *gin.Context)    { c.JSON(200, gin.H{"team": globalTeam.ListAll()}) }
+func handleInbox(c *gin.Context)   { c.JSON(200, gin.H{"inbox": globalBus.ReadInbox("lead")}) }
 
-// handleTeam 查看队友状态
-func handleTeam(c *gin.Context) {
-	c.JSON(200, gin.H{"team": globalTeam.ListAll()})
-}
-
-// handleInbox 查看收件箱
-func handleInbox(c *gin.Context) {
-	msgs := globalBus.ReadInbox("lead")
-	c.JSON(200, gin.H{"inbox": msgs})
-}
-
-// handleCompact 手动压缩
 func handleCompact(c *gin.Context) {
-	var req struct {
-		SessionID string `json:"session_id"`
-	}
+	var req struct{ SessionID string `json:"session_id"` }
 	c.ShouldBindJSON(&req)
 	if req.SessionID == "" {
 		req.SessionID = "default"
 	}
-
 	session := getOrCreateSession(req.SessionID)
 	session.mu.Lock()
 	session.Input = AutoCompact(session.Input)
 	session.mu.Unlock()
-
-	slog.Info("manual compact via API", "session_id", req.SessionID)
 	c.JSON(200, gin.H{"status": "compacted"})
 }
 
 // ---- 启动入口 ----
 
 func main() {
-	// 配置 slog 输出到 stderr，详细级别
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
-
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("=== Go Agent starting ===")
 
 	initConfig()
 	initGlobals()
 
 	r := gin.Default()
-
-	// CORS 中间件
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -227,7 +248,6 @@ func main() {
 		c.Next()
 	})
 
-	// 路由
 	r.POST("/chat", handleChat)
 	r.GET("/tasks", handleTasks)
 	r.GET("/team", handleTeam)
@@ -241,8 +261,6 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-// ---- 工具函数 ----
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

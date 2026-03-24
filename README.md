@@ -1,503 +1,218 @@
-# s_full.py — 完整参考 Agent 详解
+# Go Agent — AI 编程助手
 
-> 这是一个用 Python 编写的 **AI 编程助手（Agent）**。它就像一个"智能管家"：你对它说话，它会思考该用什么工具来完成你的要求（比如读写文件、运行命令），然后自动执行，再把结果反馈给你。它甚至可以"生小弟"（子 Agent / 队友），让它们并行帮你干活。
+基于 Go + Gin + SSE 的 AI Agent 服务器。使用 OpenAI Responses API，支持工具调用、子 Agent、队友协作、后台任务等完整 Agent 能力。
 
----
-
-## 目录
-
-- [核心概念：什么是 Agent？](#核心概念什么是-agent)
-- [整体架构图](#整体架构图)
-- [程序启动流程](#程序启动流程)
-- [主循环详解（agent_loop）](#主循环详解agent_loop)
-- [各模块原理](#各模块原理)
-  - [基础工具层](#1-基础工具层-base_tools)
-  - [Todo 管理](#2-todo-管理-s03)
-  - [子 Agent（Subagent）](#3-子-agentsubagents04)
-  - [技能加载器（Skills）](#4-技能加载器skillss05)
-  - [上下文压缩](#5-上下文压缩compressions06)
-  - [持久化任务管理](#6-持久化任务管理file_taskss07)
-  - [后台任务管理](#7-后台任务管理backgrounds08)
-  - [消息总线与队友系统](#8-消息总线与队友系统messagingteams09s11)
-  - [关机协议与计划审批](#9-关机协议与计划审批shutdownplans10)
-- [REPL 快捷命令](#repl-快捷命令)
-- [伪代码总览](#伪代码总览)
-- [配置与依赖](#配置与依赖)
+从 [s_full.py](../s_full.py) 完整移植。
 
 ---
 
-## 核心概念：什么是 Agent？
+## 快速开始
 
-想象你雇了一个很聪明的助理，但这个助理：
+```bash
+# 1. 进入目录
+cd go-agent
 
-1. **不能亲手操作电脑**，必须通过你给他的"工具箱"来完成工作
-2. 每次你跟他说话，他会**思考**然后**选择一个工具**来用
-3. 用完工具后，看看结果，决定要不要**继续用下一个工具**
-4. 直到他觉得任务完成了，才**回话给你**
+# 2. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入你的 API Key
 
-```
-你（用户）──说话──▶ Agent（AI大脑）──选工具──▶ 工具（bash/读写文件/...）
-                     ◀──看结果──              ──返回结果──▶
-                     ──再选工具──▶ ...
-                     ◀──最终回复──
-```
+# 3. 运行
+go run .
 
-这就是 `s_full.py` 的核心模式。技术上叫 **ReAct 模式**（Reasoning + Acting，推理 + 行动）。
-
----
-
-## 整体架构图
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         s_full.py 架构                           │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                     REPL 入口 (__main__)                     │ │
-│  │  用户输入 → 处理斜杠命令 → 放入对话历史 → 调用 agent_loop    │ │
-│  └─────────────────┬───────────────────────────────────────────┘ │
-│                    ▼                                             │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                    Agent 主循环 (agent_loop)                 │ │
-│  │                                                              │ │
-│  │  每轮循环:                                                    │ │
-│  │  1. 【压缩】微压缩旧工具结果 + 检查是否需要自动压缩          │ │
-│  │  2. 【通知】检查后台任务完成通知                               │ │
-│  │  3. 【收件】检查 lead 的消息收件箱                            │ │
-│  │  4. 【调用 LLM】发送对话历史给 AI 模型                        │ │
-│  │  5. 【执行工具】根据 AI 返回的工具调用逐个执行                 │ │
-│  │  6. 【提醒】如果有未完成 Todo 且 3 轮没更新，插入提醒         │ │
-│  │  7. 重复，直到 AI 不再调用工具（给出最终文字回复）             │ │
-│  └─────────────────┬───────────────────────────────────────────┘ │
-│                    ▼                                             │
-│  ┌──────── 工具层 (24 个工具) ────────┐                          │
-│  │ bash, read_file, write_file,       │                          │
-│  │ edit_file, TodoWrite, task(子Agent),│                         │
-│  │ load_skill, compress, background_, │                          │
-│  │ task_create/get/update/list,       │                          │
-│  │ spawn_teammate, list_teammates,    │                          │
-│  │ send_message, read_inbox, broadcast│                          │
-│  │ shutdown_request, plan_approval,   │                          │
-│  │ idle, claim_task                   │                          │
-│  └────────────────────────────────────┘                          │
-│                                                                  │
-│  ┌──────── 后台系统 ────────┐  ┌──────── 队友系统 ────────┐      │
-│  │ 线程池执行异步命令        │  │ 每个队友是独立 AI 线程    │      │
-│  │ 完成后发送通知到队列      │  │ 有自己的工作/空闲循环     │      │
-│  └──────────────────────────┘  │ 可以自动认领未分配任务    │      │
-│                                └──────────────────────────┘      │
-└──────────────────────────────────────────────────────────────────┘
+# 4. 测试
+curl -N -X POST http://localhost:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"test1","message":"列出当前目录的文件"}'
 ```
 
 ---
 
-## 程序启动流程
+## API 端点
 
-```
-程序启动
-│
-├── 1. 加载环境变量（.env 文件中的 API Key 等）
-├── 2. 初始化 Anthropic 客户端（连接 AI 大脑）
-├── 3. 设置工作目录、团队目录、任务目录等路径
-├── 4. 创建全局实例：
-│      ├── TodoManager    — 短期待办列表
-│      ├── SkillLoader    — 从 skills/ 加载技能文档
-│      ├── TaskManager    — 持久化任务（存文件）
-│      ├── BackgroundMgr  — 后台命令执行器
-│      ├── MessageBus     — 消息通信总线
-│      └── TeammateManager— 队友管理器
-├── 5. 构造系统提示（System Prompt）
-└── 6. 进入 REPL 循环，等待用户输入
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/chat` | 发送消息，返回 SSE 事件流 |
+| `GET` | `/tasks` | 查看持久化任务列表 |
+| `GET` | `/team` | 查看队友状态 |
+| `GET` | `/inbox` | 查看 lead 收件箱 |
+| `POST` | `/compact` | 手动压缩会话上下文 |
 
----
+### POST /chat 请求
 
-## 主循环详解（agent_loop）
-
-这是整个程序的**心脏**。每当用户输入一句话后，这个函数就被调用。
-
-### 伪代码
-
-```python
-def agent_loop(messages):
-    rounds_without_todo = 0
-
-    while True:
-        # ======= 第一步：压缩上下文 =======
-        # 把旧的工具返回结果替换成 "[cleared]"，节省 token
-        微压缩(messages)  # 只保留最近 3 个工具结果的完整内容
-
-        if 预估token数(messages) > 10万:
-            # 太长了！让 AI 总结一下之前的对话，只保留摘要
-            messages = 自动压缩(messages)
-
-        # ======= 第二步：收集异步通知 =======
-        if 后台任务有完成的:
-            把完成通知插入对话  # 这样 AI 下次思考时能看到结果
-
-        if 收件箱有新消息:
-            把消息插入对话  # 队友发来的消息
-
-        # ======= 第三步：调用 AI 大脑 =======
-        response = 调用LLM(
-            系统提示 = "你是一个编程 Agent，可以用这些工具...",
-            对话历史 = messages,
-            可用工具 = 24个工具的定义
-        )
-
-        # ======= 第四步：处理 AI 的回复 =======
-        if AI没有调用任何工具:
-            # AI 回复了纯文字，说明它觉得任务完成了
-            return  # 退出循环，回到 REPL 等待用户下一句话
-
-        # AI 调用了工具，逐个执行
-        for 每个工具调用 in response:
-            output = 执行工具(工具名, 参数)
-            把结果记录下来
-
-        # ======= 第五步：Todo 提醒 =======
-        if 有未完成的Todo and 已经连续 3 轮没更新Todo:
-            插入提醒: "记得更新你的待办事项！"
-
-        # 把工具执行结果放回对话历史，继续下一轮循环
+```json
+{
+  "session_id": "my-session",
+  "message": "帮我创建一个 hello.py"
+}
 ```
 
-### 原理解释
+### SSE 事件流
 
-**为什么是循环？** 因为一个复杂任务可能需要 AI 连续使用多个工具。比如用户说"帮我创建一个 Python 项目"，AI 可能需要：
-1. 调用 `bash` 创建文件夹
-2. 调用 `write_file` 写入代码
-3. 调用 `bash` 运行测试
-4. 看到测试失败，再 `edit_file` 修复代码
-5. 最终回复"已完成"
-
-每"想一步、做一步"就是循环的一轮。
-
----
-
-## 各模块原理
-
-### 1. 基础工具层 (base_tools)
-
-提供 4 个最基本的文件和命令操作：
-
-| 工具 | 功能 | 安全措施 |
-|------|------|----------|
-| `bash` | 运行 shell 命令 | 拦截 `rm -rf /`、`sudo` 等危险命令；120秒超时 |
-| `read_file` | 读取文件内容 | 路径不能逃逸出工作目录；内容上限 50000 字符 |
-| `write_file` | 写入文件 | 自动创建父目录；路径沙箱保护 |
-| `edit_file` | 精确替换文件中的文本 | 只替换第一个匹配，避免误伤 |
-
-**路径沙箱原理**：`safe_path()` 函数会把相对路径转换为绝对路径，然后检查它是否在工作目录之下。如果有人试图用 `../../etc/passwd` 这样的路径偷偷访问系统文件，会被直接拒绝。
-
-### 2. Todo 管理 (s03)
-
-一个**内存中的待办事项列表**，用来帮助 AI 跟踪当前任务的进度。
-
-```python
-class TodoManager:
-    # 每个 Todo 项有三个字段：
-    #   content:    "实现登录功能"
-    #   status:     pending / in_progress / completed
-    #   activeForm: "在编写 login.py"（当前正在做什么的描述）
-
-    规则：
-    - 最多 20 项
-    - 同时只能有 1 项处于 in_progress 状态
-    - 如果 AI 连续 3 轮没更新 Todo，主循环会插入提醒
-```
-
-**为什么需要这个？** 大语言模型没有"记忆"，每次调用都是独立的。Todo 列表相当于给 AI 一张"便签纸"，让它知道自己做到哪了、还有什么没做。
-
-### 3. 子 Agent（Subagent，s04）
-
-当主 Agent 遇到一个**独立的子任务**时，可以"派遣"一个子 Agent 去处理，子 Agent 完成后返回一段总结文字。
+返回的事件按以下顺序推送：
 
 ```
-主 Agent                              子 Agent
-  │                                     │
-  ├── task("调查项目用了哪些依赖")  ──▶ │
-  │                                     ├── bash("cat package.json")
-  │                                     ├── bash("pip freeze")
-  │                                     ├── 思考...
-  │    ◀── "项目用了 React + Flask"  ── ├── 返回总结
-  │                                     │
-  ├── 继续主任务...
-```
+event: thinking      // Agent 正在做预处理
+data: {"type":"thinking","data":{"step":"calling LLM"}}
 
-**原理**：
-- 子 Agent 本质上是**又一个完整的 Agent 循环**，只是它有自己独立的对话历史和更少的工具
-- 两种类型：`Explore`（只读，只能 bash + 读文件）和 `general-purpose`（增加写文件和编辑）
-- 最多循环 30 轮，防止无限执行
+event: tool_call     // AI 决定调用工具
+data: {"type":"tool_call","data":{"name":"bash","args":{"command":"ls"}}}
 
-**好处**：隔离上下文。子 Agent 的详细思考过程不会污染主 Agent 的对话历史，只有最终总结被带回来。
+event: tool_result   // 工具执行结果
+data: {"type":"tool_result","data":{"name":"bash","result":"file1.txt\nfile2.txt"}}
 
-### 4. 技能加载器（Skills，s05）
+event: message       // AI 最终回复
+data: {"type":"message","data":{"content":"已完成..."}}
 
-从 `skills/` 目录加载预写的知识文档，让 AI 在需要时获取专业知识。
-
-```
-skills/
-├── deploy/
-│   └── SKILL.md          ← 部署相关的操作指南
-├── code_review/
-│   └── SKILL.md          ← 代码审查的checklist
-└── testing/
-    └── SKILL.md          ← 测试策略和框架用法
-```
-
-每个 `SKILL.md` 文件格式：
-```markdown
----
-name: deploy
-description: 部署到生产环境的步骤
----
-1. 先跑测试...
-2. 构建...
-```
-
-AI 调用 `load_skill("deploy")` → 技能内容被插入对话 → AI 就"学会了"这个技能。
-
-### 5. 上下文压缩（Compression，s06）
-
-大语言模型有**上下文窗口限制**（比如 10 万 token）。对话越长，越接近上限。压缩机制解决了这个问题。
-
-#### 两层压缩策略
-
-```
-                    对话历史
-                    ┌─────────────────────┐
-                    │ 用户: "帮我建项目"    │
-                    │ AI: 调用 bash        │
-第一层: 微压缩       │ 工具结果: 50行输出... │  ← 替换为 "[cleared]"
-(每次调用前执行)     │ AI: 调用 write_file  │
-                    │ 工具结果: 成功        │  ← 替换为 "[cleared]"
-                    │ AI: 调用 bash        │
-                    │ 工具结果: 最新结果    │  ← 保留（最近3个）
-                    └─────────────────────┘
-
-第二层: 自动压缩      当总 token > 10万 时触发
-(达到阈值时触发)     1. 把完整对话保存到 .transcripts/ 文件（留底）
-                    2. 让另一个 AI 调用总结整段对话
-                    3. 用 2 条消息替换整个对话历史:
-                       用户: "[已压缩。原始记录: xxx] 总结内容..."
-                       助手: "明白，根据上下文继续工作。"
-```
-
-**关键洞察**：压缩后会丢失细节，但是保留了"方向感"。AI 知道自己之前做了什么，可以继续工作。原始完整对话还存在磁盘上备查。
-
-### 6. 持久化任务管理（file_tasks，s07）
-
-与 Todo 不同，Task 是**存储在文件系统中的**，跨会话持久化。
-
-```
-.tasks/
-├── task_1.json    { id:1, subject:"设计数据库", status:"completed", owner:"lead" }
-├── task_2.json    { id:2, subject:"实现API", status:"in_progress", owner:"backend-dev" }
-└── task_3.json    { id:3, subject:"写前端", status:"pending", blockedBy:[2] }
-```
-
-特性：
-- **依赖关系**：task_3 被 task_2 阻塞，只有 task_2 完成后，task_3 的 `blockedBy` 才会被自动清除
-- **所有权**：任务可以被分配给 lead（主 Agent）或队友
-- **状态流转**：`pending` → `in_progress` → `completed`（或 `deleted`）
-
-### 7. 后台任务管理（Background，s08）
-
-有些命令需要运行很长时间（比如跑测试、构建项目），不能让 AI 干等着。
-
-```python
-# AI 调用 background_run("npm test")
-# → 立刻返回 "Background task abc123 started"
-# → 真正的命令在另一个线程中运行
-
-# AI 可以继续做别的事情...
-
-# 命令跑完后，通知被放入队列
-# 下一轮 agent_loop 开头会检查这个队列
-# "啊，abc123 跑完了，结果是: 5 tests passed"
-```
-
-**关键机制**：`Queue`（队列）用于线程间通信。后台线程执行完毕后往队列里放通知，主循环每轮开头把队列排空（drain），把通知插入对话历史。
-
-### 8. 消息总线与队友系统（Messaging/Team，s09/s11）
-
-这是最复杂的部分。Agent 不只是一个人在战斗，它可以**同时管理多个 AI 队友**。
-
-#### 消息总线 (MessageBus)
-
-```
-                     .team/inbox/
-                     ├── lead.jsonl       ← 主 Agent 的收件箱
-                     ├── backend-dev.jsonl← 队友的收件箱
-                     └── tester.jsonl     ← 队友的收件箱
-
-发送消息: 往目标的 .jsonl 文件追加一行 JSON
-读取消息: 读取自己的 .jsonl，然后清空文件（读后即焚）
-```
-
-#### 队友生命周期
-
-```
-spawn_teammate("backend-dev", "后端开发", "实现用户API")
-  │
-  ▼
-┌──────────── 独立线程 ──────────────┐
-│                                     │
-│  工作阶段 (最多50轮):               │
-│  ├── 检查收件箱（有 shutdown？退出）│
-│  ├── 调用 LLM                      │
-│  ├── 执行工具                      │
-│  ├── 如果 AI 调用 idle → 进入空闲  │
-│  └── 循环...                       │
-│                                     │
-│  空闲阶段 (最多60秒):               │
-│  ├── 每5秒：                        │
-│  │   ├── 检查收件箱（有消息？恢复）│
-│  │   └── 检查任务板（有未认领的？） │
-│  │       └── 自动认领 → 恢复工作   │
-│  └── 超时 → 自动关闭               │
-│                                     │
-└─────────────────────────────────────┘
-```
-
-**自动认领任务（s11）** 是最巧妙的设计：
-
-```python
-# 空闲阶段，队友扫描 .tasks/ 目录
-for 每个 task 文件:
-    if 状态是 pending AND 没有 owner AND 没有被阻塞:
-        认领这个任务
-        把任务内容注入对话历史
-        恢复工作阶段
-```
-
-这让团队像一条流水线：主 Agent 创建任务 → 空闲的队友自动捡起来做 → 做完变空闲 → 再捡下一个。
-
-### 9. 关机协议与计划审批（Shutdown/Plan，s10）
-
-#### 优雅关机
-
-主 Agent 不能直接"杀掉"队友线程，而是通过消息总线发送 `shutdown_request`。队友在下次检查收件箱时看到这条消息，主动结束自己。
-
-```
-主 Agent            消息总线              队友
-  │                   │                    │
-  ├── shutdown_req ─▶ │ ─── 写入 .jsonl ─▶│
-  │                   │                    ├── 检查收件箱
-  │                   │                    ├── 看到 shutdown
-  │                   │                    └── 设状态 shutdown, return
-```
-
-#### 计划审批
-
-队友可以提交一个"计划"给主 Agent 审批。主 Agent（或用户通过主 Agent）决定是否批准。这防止队友擅自做出重大变更。
-
----
-
-## REPL 快捷命令
-
-| 命令 | 功能 |
-|------|------|
-| `/compact` | 手动触发对话压缩 |
-| `/tasks` | 查看所有持久化任务 |
-| `/team` | 查看所有队友状态 |
-| `/inbox` | 查看主 Agent 的收件箱 |
-| `q` 或 `exit` | 退出程序 |
-
----
-
-## 伪代码总览
-
-把整个程序浓缩成一段完整的伪代码：
-
-```
-程序启动:
-    加载环境变量和 API 密钥
-    初始化全局管理器（Todo, 技能, 任务, 后台, 消息, 队友）
-    构建系统提示: "你是一个编程Agent，有这些工具和技能..."
-
-REPL 循环:
-    while True:
-        打印提示符 "s_full >> "
-        用户输入 = 读取输入()
-
-        if 输入是斜杠命令:
-            /compact → 压缩对话
-            /tasks  → 显示任务列表
-            /team   → 显示队友状态
-            /inbox  → 显示收件箱
-            continue
-
-        把 {role: user, content: 用户输入} 放入对话历史
-
-        调用 agent_loop(对话历史):
-            while True:
-                # ── 环境准备 ──
-                微压缩: 清除旧的工具输出（只保留最近3个）
-                if token数 > 阈值: 自动压缩整段对话
-
-                排空后台通知队列 → 插入对话
-                排空收件箱 → 插入对话
-
-                # ── AI 思考 ──
-                response = LLM(系统提示, 对话历史, 工具定义)
-
-                if AI 返回纯文字（没有工具调用）:
-                    break  # 任务完成，退出循环
-
-                # ── 执行工具 ──
-                for 每个工具调用:
-                    匹配工具名 → 调用对应处理函数
-                    记录结果
-
-                # ── 提醒机制 ──
-                if 有未完成Todo AND 3轮没更新:
-                    插入提醒
-
-                把所有工具结果放回对话历史
-                继续下一轮循环...
-
-        打印 AI 的最终回复
+event: done          // 流结束
+data: {"type":"done","data":{}}
 ```
 
 ---
 
-## 配置与依赖
+## 环境变量
 
-### 环境变量
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `OPENAI_API_KEY` | ✅ | — | API 密钥 |
+| `OPENAI_BASE_URL` | — | `https://api.openai.com` | API 地址（兼容其他 OpenAI 兼容服务） |
+| `MODEL_ID` | — | `gpt-4o` | 模型名称 |
+| `PORT` | — | `8080` | 服务端口 |
+| `WORKDIR` | — | 当前目录 | 工作目录（文件操作的沙箱根目录） |
 
-| 变量名 | 说明 |
-|--------|------|
-| `ANTHROPIC_BASE_URL` | API 地址（可选，用于自定义端点） |
-| `ANTHROPIC_API_KEY` | Anthropic API 密钥 |
-| `MODEL_ID` | 使用的模型名（如 `claude-sonnet-4-20250514`） |
+---
+
+## 原理与流程
+
+### 核心思想：ReAct 循环
+
+Agent 的本质是一个 **"思考→行动→观察"** 的循环：
+
+```
+用户说话 ──▶ Agent（AI 大脑）──选工具──▶ 执行工具 ──返回结果──▶ Agent 再想
+                                                                   ↓
+                                                            继续选工具 / 给出回复
+```
+
+AI 模型不会直接执行任何操作，它只是"决定用哪个工具、传什么参数"，然后由 Go 代码实际执行。
+
+### 完整流程图
+
+```
+用户 POST /chat ──▶ Gin 路由
+                      │
+                      ▼
+              ┌── AgentLoop ──────────────────────────────┐
+              │                                            │
+              │  每轮循环:                                  │
+              │                                            │
+              │  1. 微压缩                                  │
+              │     旧的工具返回结果 → "[cleared]"           │
+              │     只保留最近 3 个结果的完整内容             │
+              │                                            │
+              │  2. 自动压缩（如果 token > 10万）            │
+              │     完整对话 → 保存到 .transcripts/          │
+              │     调 LLM 总结 → 替换整个对话历史           │
+              │                                            │
+              │  3. 排空后台通知                             │
+              │     goroutine 执行完的命令 → 注入对话        │
+              │                                            │
+              │  4. 排空收件箱                               │
+              │     队友发来的消息 → 注入对话                 │
+              │                                            │
+              │  5. 调用 LLM                                │
+              │     POST /v1/responses ──▶ OpenAI           │
+              │     ◀── 返回 output 数组                    │
+              │                                            │
+              │  6. 检查 output:                             │
+              │     ├── 只有 message? → SSE 推送 → 结束     │
+              │     └── 有 function_call?                   │
+              │           ├── switch(name) 执行工具         │
+              │           ├── SSE 推送 tool_call            │
+              │           ├── SSE 推送 tool_result          │
+              │           └── 结果 → 放回 input → 下一轮    │
+              │                                            │
+              │  7. Todo 提醒（连续 3 轮没更新就提醒）       │
+              │                                            │
+              └── 循环，直到 AI 不再调用工具 ──────────────┘
+                      │
+                      ▼
+              SSE 推送 done 事件 ──▶ 前端
+```
+
+### OpenAI Responses API 交互格式
+
+与传统的 Chat Completions 不同，Responses API 使用 `input` 数组（而非 `messages`） ：
+
+```
+请求: POST /v1/responses
+{
+  "model": "gpt-4o",
+  "instructions": "你是一个编程 Agent...",   ← 类似 system prompt
+  "input": [                                 ← 对话历史
+    { "type": "message", "role": "user",
+      "content": [{"type":"input_text","text":"帮我列出文件"}] },
+    { "type": "function_call_output",        ← 上一轮的工具结果
+      "call_id": "call_abc",
+      "output": "file1.txt\nfile2.txt" }
+  ],
+  "tools": [                                 ← 工具定义
+    { "type":"function", "name":"bash", ... }
+  ]
+}
+
+响应:
+{
+  "output": [                                ← AI 的输出
+    { "type": "function_call",               ← AI 要调用工具
+      "call_id": "call_xyz",
+      "name": "write_file",
+      "arguments": "{\"path\":\"hello.py\",...}" },
+    { "type": "message",                     ← AI 的文字回复
+      "role": "assistant",
+      "content": [{"type":"output_text","text":"已创建文件"}] }
+  ]
+}
+```
+
+### 24 个工具一览
+
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| **基础** | `bash` `read_file` `write_file` `edit_file` | 命令执行、文件读写编辑 |
+| **待办** | `TodoWrite` | 内存中的任务清单 |
+| **子Agent** | `task` | 派遣独立的子 Agent 做隔离任务 |
+| **技能** | `load_skill` | 加载预写的知识文档 |
+| **压缩** | `compress` | 手动压缩上下文 |
+| **后台** | `background_run` `check_background` | 异步命令执行 |
+| **任务** | `task_create` `task_get` `task_update` `task_list` `claim_task` | 持久化任务管理（存文件） |
+| **团队** | `spawn_teammate` `list_teammates` | 生成/管理 AI 队友 |
+| **通信** | `send_message` `read_inbox` `broadcast` | 消息收发 |
+| **管控** | `shutdown_request` `plan_approval` `idle` | 关机协议、计划审批 |
 
 ### 目录结构
 
 ```
-工作目录/
-├── s_full.py            ← 本文件
-├── .env                 ← 环境变量
-├── skills/              ← 技能文档目录
-│   └── xxx/SKILL.md
-├── .tasks/              ← 持久化任务 (JSON 文件)
-├── .team/               ← 团队配置
-│   ├── config.json      ← 团队成员列表
-│   └── inbox/           ← 各成员收件箱 (.jsonl)
-└── .transcripts/        ← 压缩前的完整对话记录
+go-agent/
+├── main.go           # Gin 路由、配置、入口
+├── agent.go          # Agent 主循环
+├── llm.go            # OpenAI Responses API 调用
+├── types.go          # 所有结构体
+├── tools.go          # 工具定义 + switch-case 分发
+├── tools_base.go     # bash / read / write / edit
+├── todo.go           # 待办管理
+├── task.go           # 持久化任务
+├── skill.go          # 技能加载
+├── compress.go       # 上下文压缩
+├── background.go     # 后台任务（goroutine + channel）
+├── message.go        # 消息总线
+├── team.go           # 队友管理
+├── .env.example      # 环境变量示例
+└── go.mod / go.sum
+
+运行时生成:
+├── .tasks/           # 持久化任务 JSON
+├── .team/            # 团队配置 + 收件箱
+│   ├── config.json
+│   └── inbox/
+└── .transcripts/     # 压缩前的完整对话记录
 ```
-
-### 依赖包
-
-```bash
-pip install anthropic python-dotenv
-```
-
-### 关键常量
-
-| 常量 | 值 | 含义 |
-|------|-----|------|
-| `TOKEN_THRESHOLD` | 100,000 | 超过此 token 数触发自动压缩 |
-| `POLL_INTERVAL` | 5 秒 | 空闲队友检查消息的频率 |
-| `IDLE_TIMEOUT` | 60 秒 | 队友空闲超时后自动关闭 |

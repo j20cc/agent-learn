@@ -1,27 +1,26 @@
 package main
 
 // =====================================================
-// agent.go - Agent 主循环 (对应 Python 的 agent_loop)
-// 核心 ReAct 循环：思考→行动→观察→思考...
+// agent.go - Agent 主循环 + 子Agent
 // =====================================================
 
 import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+
+	"go-agent/tools"
 )
 
-// SSEWriter 是 SSE 事件推送函数类型
 type SSEWriter func(event SSEEvent)
 
 // AgentLoop Agent 主循环
-// session: 当前会话（包含对话历史）
-// sse: SSE 推送回调（为 nil 则不推送）
 func AgentLoop(session *Session, sse SSEWriter) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
 	roundsWithoutTodo := 0
+	allToolDefs := tools.AllToolDefs()
 
 	for round := 0; round < 50; round++ {
 		slog.Info("agent loop round", "round", round, "input_count", len(session.Input))
@@ -29,8 +28,6 @@ func AgentLoop(session *Session, sse SSEWriter) {
 		// === 第一步：压缩管道 ===
 		Microcompact(session.Input)
 		tokens := EstimateTokens(session.Input)
-		slog.Info("token estimate", "tokens", tokens, "threshold", cfg.TokenThreshold)
-
 		if tokens > cfg.TokenThreshold {
 			slog.Info("auto-compact triggered")
 			if sse != nil {
@@ -48,14 +45,8 @@ func AgentLoop(session *Session, sse SSEWriter) {
 				txt += fmt.Sprintf("[bg:%s] %s: %s\n", n.TaskID, n.Status, n.Result)
 			}
 			session.Input = append(session.Input,
-				InputItem{
-					Type: "message", Role: "user",
-					Content: []ContentPart{{Type: "input_text", Text: "<background-results>\n" + txt + "</background-results>"}},
-				},
-				InputItem{
-					Type: "message", Role: "assistant",
-					Content: []ContentPart{{Type: "output_text", Text: "Noted background results."}},
-				},
+				InputItem{Type: "message", Role: "user", Content: []ContentPart{{Type: "input_text", Text: "<background-results>\n" + txt + "</background-results>"}}},
+				InputItem{Type: "message", Role: "assistant", Content: []ContentPart{{Type: "output_text", Text: "Noted background results."}}},
 			)
 		}
 
@@ -65,14 +56,8 @@ func AgentLoop(session *Session, sse SSEWriter) {
 			slog.Info("inbox drained", "count", len(inbox))
 			inboxJSON, _ := json.MarshalIndent(inbox, "", "  ")
 			session.Input = append(session.Input,
-				InputItem{
-					Type: "message", Role: "user",
-					Content: []ContentPart{{Type: "input_text", Text: "<inbox>" + string(inboxJSON) + "</inbox>"}},
-				},
-				InputItem{
-					Type: "message", Role: "assistant",
-					Content: []ContentPart{{Type: "output_text", Text: "Noted inbox messages."}},
-				},
+				InputItem{Type: "message", Role: "user", Content: []ContentPart{{Type: "input_text", Text: "<inbox>" + string(inboxJSON) + "</inbox>"}}},
+				InputItem{Type: "message", Role: "assistant", Content: []ContentPart{{Type: "output_text", Text: "Noted inbox messages."}}},
 			)
 		}
 
@@ -81,21 +66,25 @@ func AgentLoop(session *Session, sse SSEWriter) {
 			sse(SSEEvent{Type: "thinking", Data: map[string]string{"step": "calling LLM"}})
 		}
 
-		resp, err := CallLLM(globalSystemPrompt, session.Input, AllTools())
+		// 将 []map[string]any 转换为 []any
+		toolsAny := make([]any, len(allToolDefs))
+		for i, t := range allToolDefs {
+			toolsAny[i] = t
+		}
+
+		resp, err := CallLLM(globalSystemPrompt, session.Input, toolsAny)
 		if err != nil {
-			slog.Error("LLM call failed in agent loop", "error", err)
+			slog.Error("LLM call failed", "error", err)
 			if sse != nil {
 				sse(SSEEvent{Type: "error", Data: map[string]string{"error": err.Error()}})
 			}
 			return
 		}
 
-		// 把 AI 的消息输出加入 input（用于后续轮次的上下文）
+		// 把 AI 的消息加入 input
 		for _, item := range resp.Output {
 			if item.Type == "message" {
-				session.Input = append(session.Input, InputItem{
-					Type: "message", Role: "assistant", Content: item.Content,
-				})
+				session.Input = append(session.Input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
 			}
 		}
 
@@ -109,7 +98,6 @@ func AgentLoop(session *Session, sse SSEWriter) {
 		}
 
 		if !hasFuncCalls {
-			// AI 回复了纯文字，任务完成
 			for _, item := range resp.Output {
 				if item.Type == "message" {
 					for _, c := range item.Content {
@@ -138,8 +126,7 @@ func AgentLoop(session *Session, sse SSEWriter) {
 
 			if sse != nil {
 				sse(SSEEvent{Type: "tool_call", Data: map[string]any{
-					"name": item.Name,
-					"args": json.RawMessage(item.Arguments),
+					"name": item.Name, "args": json.RawMessage(item.Arguments),
 				}})
 			}
 
@@ -147,27 +134,19 @@ func AgentLoop(session *Session, sse SSEWriter) {
 				manualCompress = true
 			}
 
-			output := DispatchTool(item.Name, item.Arguments)
+			output := toolRegistry.Dispatch(item.Name, item.Arguments)
 
 			slog.Info("tool result", "name", item.Name, "output_len", len(output))
 
 			if sse != nil {
-				resultPreview := output
-				if len(resultPreview) > 2000 {
-					resultPreview = resultPreview[:2000] + "..."
+				preview := output
+				if len(preview) > 2000 {
+					preview = preview[:2000] + "..."
 				}
-				sse(SSEEvent{Type: "tool_result", Data: map[string]any{
-					"name":   item.Name,
-					"result": resultPreview,
-				}})
+				sse(SSEEvent{Type: "tool_result", Data: map[string]any{"name": item.Name, "result": preview}})
 			}
 
-			// 把工具结果加入 input
-			session.Input = append(session.Input, InputItem{
-				Type:   "function_call_output",
-				CallID: item.CallID,
-				Output: output,
-			})
+			session.Input = append(session.Input, InputItem{Type: "function_call_output", CallID: item.CallID, Output: output})
 
 			if item.Name == "TodoWrite" {
 				usedTodo = true
@@ -180,7 +159,6 @@ func AgentLoop(session *Session, sse SSEWriter) {
 		} else {
 			roundsWithoutTodo++
 		}
-
 		if globalTodo.HasOpenItems() && roundsWithoutTodo >= 3 {
 			slog.Info("todo reminder injected")
 			session.Input = append(session.Input, InputItem{
@@ -189,7 +167,6 @@ func AgentLoop(session *Session, sse SSEWriter) {
 			})
 		}
 
-		// 手动压缩
 		if manualCompress {
 			slog.Info("manual compact triggered")
 			session.Input = AutoCompact(session.Input)
@@ -200,4 +177,71 @@ func AgentLoop(session *Session, sse SSEWriter) {
 	if sse != nil {
 		sse(SSEEvent{Type: "error", Data: map[string]string{"error": "Agent hit max rounds (50)"}})
 	}
+}
+
+// runSubagent 子 Agent（独立循环）
+func runSubagent(prompt, agentType string) string {
+	slog.Info("subagent spawned", "type", agentType, "prompt_len", len(prompt))
+
+	subToolDefs := tools.SubagentToolDefs(agentType)
+	subToolsAny := make([]any, len(subToolDefs))
+	for i, t := range subToolDefs {
+		subToolsAny[i] = t
+	}
+
+	input := []InputItem{
+		{Type: "message", Role: "user", Content: []ContentPart{{Type: "input_text", Text: prompt}}},
+	}
+
+	var lastResp *ResponsesResponse
+	for i := 0; i < 30; i++ {
+		resp, err := CallLLM("", input, subToolsAny)
+		if err != nil {
+			slog.Error("subagent LLM call failed", "error", err)
+			return "(subagent failed)"
+		}
+		lastResp = resp
+
+		for _, item := range resp.Output {
+			if item.Type == "message" {
+				input = append(input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
+			}
+		}
+
+		hasFuncCalls := false
+		for _, item := range resp.Output {
+			if item.Type == "function_call" {
+				hasFuncCalls = true
+				break
+			}
+		}
+		if !hasFuncCalls {
+			break
+		}
+
+		for _, item := range resp.Output {
+			if item.Type != "function_call" {
+				continue
+			}
+			output := tools.DispatchBaseTool(cfg.WorkDir, item.Name, item.Arguments)
+			slog.Info("subagent tool", "tool", item.Name, "output_len", len(output))
+			if len(output) > 50000 {
+				output = output[:50000]
+			}
+			input = append(input, InputItem{Type: "function_call_output", CallID: item.CallID, Output: output})
+		}
+	}
+
+	if lastResp != nil {
+		for _, item := range lastResp.Output {
+			if item.Type == "message" {
+				for _, c := range item.Content {
+					if c.Type == "output_text" && c.Text != "" {
+						return c.Text
+					}
+				}
+			}
+		}
+	}
+	return "(no summary)"
 }

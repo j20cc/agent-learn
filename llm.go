@@ -2,7 +2,7 @@ package main
 
 // =====================================================
 // llm.go - OpenAI Responses API 调用
-// POST /v1/responses，手写 HTTP，不引入 SDK
+// POST /v1/responses
 // =====================================================
 
 import (
@@ -16,15 +16,12 @@ import (
 )
 
 // CallLLM 调用 OpenAI Responses API
-// instructions: 系统指令（可选）
-// input: 对话输入（消息 + 工具结果）
-// tools: 可用工具列表
-func CallLLM(instructions string, input []InputItem, tools []ToolDef) (*ResponsesResponse, error) {
+func CallLLM(instructions string, input []InputItem, toolDefs []any) (*ResponsesResponse, error) {
 	req := ResponsesRequest{
 		Model:        cfg.ModelID,
 		Instructions: instructions,
 		Input:        input,
-		Tools:        tools,
+		Tools:        toolDefs,
 		MaxTokens:    8000,
 	}
 
@@ -36,7 +33,7 @@ func CallLLM(instructions string, input []InputItem, tools []ToolDef) (*Response
 	slog.Info("calling LLM",
 		"model", cfg.ModelID,
 		"input_count", len(input),
-		"tools_count", len(tools),
+		"tools_count", len(toolDefs),
 		"body_bytes", len(body),
 	)
 
@@ -69,10 +66,7 @@ func CallLLM(instructions string, input []InputItem, tools []ToolDef) (*Response
 	)
 
 	if httpResp.StatusCode != http.StatusOK {
-		slog.Error("LLM returned non-200",
-			"status", httpResp.StatusCode,
-			"body", string(respBody),
-		)
+		slog.Error("LLM returned non-200", "status", httpResp.StatusCode, "body", string(respBody))
 		return nil, fmt.Errorf("API returned %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
@@ -82,9 +76,7 @@ func CallLLM(instructions string, input []InputItem, tools []ToolDef) (*Response
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
-	// 记录输出概要
-	funcCalls := 0
-	messages := 0
+	funcCalls, messages := 0, 0
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "function_call":
