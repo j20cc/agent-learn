@@ -211,23 +211,23 @@ type Registry struct {
 	WorkDir string
 
 	// 主包注入的回调函数
-	TodoUpdate       func(items json.RawMessage) string
-	RunSubagent      func(prompt, agentType string) string
-	SkillLoad        func(name string) string
-	BgRun            func(command string, timeout int) string
-	BgCheck          func(taskID string) string
-	TaskCreate       func(subject, description string) string
-	TaskGet          func(id int) string
-	TaskUpdate       func(id int, status string, blockedBy, blocks []int) string
-	TaskList         func() string
-	TaskClaim        func(id int, owner string) string
-	SpawnTeammate    func(name, role, prompt string) string
-	ListTeammates    func() string
-	SendMessage      func(to, content, msgType string) string
-	ReadInbox        func() string
-	Broadcast        func(content string) string
-	ShutdownRequest  func(teammate string) string
-	PlanApproval     func(requestID string, approve bool, feedback string) string
+	TodoUpdate      func(items json.RawMessage) string
+	RunSubagent     func(prompt, agentType string) string
+	SkillLoad       func(name string) string
+	BgRun           func(command string, timeout int) string
+	BgCheck         func(taskID string) string
+	TaskCreate      func(subject, description string) string
+	TaskGet         func(id int) string
+	TaskUpdate      func(id int, status string, blockedBy, blocks []int) string
+	TaskList        func() string
+	TaskClaim       func(id int, owner string) string
+	SpawnTeammate   func(name, role, prompt string) string
+	ListTeammates   func() string
+	SendMessage     func(to, content, msgType string) string
+	ReadInbox       func() string
+	Broadcast       func(content string) string
+	ShutdownRequest func(teammate string) string
+	PlanApproval    func(requestID string, approve bool, feedback string) string
 }
 
 // Dispatch 主 Agent 的工具分发
@@ -236,7 +236,9 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 
 	switch name {
 	case "bash":
-		var args struct{ Command string `json:"command"` }
+		var args struct {
+			Command string `json:"command"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return RunBash(r.WorkDir, args.Command)
 
@@ -266,7 +268,9 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		return RunEdit(r.WorkDir, args.Path, args.OldText, args.NewText)
 
 	case "TodoWrite":
-		var args struct{ Items json.RawMessage `json:"items"` }
+		var args struct {
+			Items json.RawMessage `json:"items"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.TodoUpdate(args.Items)
 
@@ -282,7 +286,9 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		return r.RunSubagent(args.Prompt, args.AgentType)
 
 	case "load_skill":
-		var args struct{ Name string `json:"name"` }
+		var args struct {
+			Name string `json:"name"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.SkillLoad(args.Name)
 
@@ -298,7 +304,9 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		return r.BgRun(args.Command, args.Timeout)
 
 	case "check_background":
-		var args struct{ TaskID string `json:"task_id"` }
+		var args struct {
+			TaskID string `json:"task_id"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.BgCheck(args.TaskID)
 
@@ -311,7 +319,9 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		return r.TaskCreate(args.Subject, args.Description)
 
 	case "task_get":
-		var args struct{ TaskID int `json:"task_id"` }
+		var args struct {
+			TaskID int `json:"task_id"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.TaskGet(args.TaskID)
 
@@ -356,12 +366,16 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		return r.ReadInbox()
 
 	case "broadcast":
-		var args struct{ Content string `json:"content"` }
+		var args struct {
+			Content string `json:"content"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.Broadcast(args.Content)
 
 	case "shutdown_request":
-		var args struct{ Teammate string `json:"teammate"` }
+		var args struct {
+			Teammate string `json:"teammate"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.ShutdownRequest(args.Teammate)
 
@@ -378,7 +392,9 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		return "Lead does not idle."
 
 	case "claim_task":
-		var args struct{ TaskID int `json:"task_id"` }
+		var args struct {
+			TaskID int `json:"task_id"`
+		}
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.TaskClaim(args.TaskID, "lead")
 
