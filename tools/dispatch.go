@@ -24,7 +24,7 @@ func ToolDef(name, desc string, params map[string]any) map[string]any {
 
 func ParamObj(props ...map[string]any) map[string]any {
 	properties := map[string]any{}
-	var required []string
+	required := []string{}
 	for _, p := range props {
 		for k, v := range p {
 			properties[k] = v
