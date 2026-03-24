@@ -21,6 +21,11 @@ func AgentLoop(session *Session, sse SSEWriter) {
 
 	roundsWithoutTodo := 0
 	allToolDefs := tools.AllToolDefs()
+	// 将 []map[string]any 转换为 []any
+	toolsAny := make([]any, len(allToolDefs))
+	for i, t := range allToolDefs {
+		toolsAny[i] = t
+	}
 
 	for round := 0; round < 50; round++ {
 		slog.Info("agent loop round", "round", round, "input_count", len(session.Input))
@@ -64,12 +69,6 @@ func AgentLoop(session *Session, sse SSEWriter) {
 		// === 第四步：调用 LLM ===
 		if sse != nil {
 			sse(SSEEvent{Type: "thinking", Data: map[string]string{"step": "calling LLM"}})
-		}
-
-		// 将 []map[string]any 转换为 []any
-		toolsAny := make([]any, len(allToolDefs))
-		for i, t := range allToolDefs {
-			toolsAny[i] = t
 		}
 
 		resp, err := CallLLM(globalSystemPrompt, session.Input, toolsAny)

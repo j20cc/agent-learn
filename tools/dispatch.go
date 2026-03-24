@@ -162,6 +162,18 @@ func AllToolDefs() []map[string]any {
 
 		ToolDef("idle", "Enter idle state.", ParamObj()),
 		ToolDef("claim_task", "Claim a task from the board.", ParamObj(ReqInt("task_id"))),
+
+		ToolDef("http_request", "Send an HTTP request. Ask user for missing info before calling.", map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"url":     map[string]string{"type": "string"},
+				"method":  map[string]any{"type": "string", "enum": []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}},
+				"headers": map[string]any{"type": "object", "additionalProperties": map[string]string{"type": "string"}},
+				"body":    map[string]string{"type": "string"},
+				"timeout": map[string]any{"type": "integer", "default": 30},
+			},
+			"required": []string{"url"},
+		}),
 	}
 }
 
@@ -369,6 +381,11 @@ func (r *Registry) Dispatch(name, argsJSON string) string {
 		var args struct{ TaskID int `json:"task_id"` }
 		jsonUnmarshal([]byte(argsJSON), &args)
 		return r.TaskClaim(args.TaskID, "lead")
+
+	case "http_request":
+		var args HTTPRequestArgs
+		jsonUnmarshal([]byte(argsJSON), &args)
+		return RunHTTPRequest(args)
 
 	default:
 		slog.Warn("unknown tool", "name", name)
