@@ -17,13 +17,17 @@ type ResponsesRequest struct {
 	MaxTokens    int         `json:"max_output_tokens,omitempty"`
 }
 
-// InputItem 可以是消息(message)或工具调用结果(function_call_output)
+// InputItem 可以是 message / function_call / function_call_output
 type InputItem struct {
 	Type    string        `json:"type"`
 	Role    string        `json:"role,omitempty"`
 	Content []ContentPart `json:"content,omitempty"`
 	CallID  string        `json:"call_id,omitempty"`
 	Output  string        `json:"output,omitempty"`
+	// type=function_call 时使用
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Status    string `json:"status,omitempty"`
 }
 
 type ContentPart struct {

@@ -81,10 +81,16 @@ func AgentLoop(session *Session, sse SSEWriter) {
 			return
 		}
 
-		// 把 AI 的消息加入 input
+		// 把 AI 的所有输出加入 input（message + function_call）
 		for _, item := range resp.Output {
-			if item.Type == "message" {
+			switch item.Type {
+			case "message":
 				session.Input = append(session.Input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
+			case "function_call":
+				session.Input = append(session.Input, InputItem{
+					Type: "function_call", CallID: item.CallID,
+					Name: item.Name, Arguments: item.Arguments, Status: item.Status,
+				})
 			}
 		}
 
@@ -113,7 +119,7 @@ func AgentLoop(session *Session, sse SSEWriter) {
 			return
 		}
 
-		// === 第六步：执行工具调用 ===
+		// === 第六步：执行工具调用（function_call 已在上面加入 input）===
 		usedTodo := false
 		manualCompress := false
 
@@ -146,6 +152,7 @@ func AgentLoop(session *Session, sse SSEWriter) {
 				sse(SSEEvent{Type: "tool_result", Data: map[string]any{"name": item.Name, "result": preview}})
 			}
 
+			// function_call 已在前面加入 input，这里只加 function_call_output
 			session.Input = append(session.Input, InputItem{Type: "function_call_output", CallID: item.CallID, Output: output})
 
 			if item.Name == "TodoWrite" {
@@ -202,17 +209,17 @@ func runSubagent(prompt, agentType string) string {
 		}
 		lastResp = resp
 
-		for _, item := range resp.Output {
-			if item.Type == "message" {
-				input = append(input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
-			}
-		}
-
 		hasFuncCalls := false
 		for _, item := range resp.Output {
-			if item.Type == "function_call" {
+			switch item.Type {
+			case "message":
+				input = append(input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
+			case "function_call":
 				hasFuncCalls = true
-				break
+				input = append(input, InputItem{
+					Type: "function_call", CallID: item.CallID,
+					Name: item.Name, Arguments: item.Arguments, Status: item.Status,
+				})
 			}
 		}
 		if !hasFuncCalls {

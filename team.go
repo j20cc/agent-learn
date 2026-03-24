@@ -133,17 +133,17 @@ func (tm *TeammateManager) teammateLoop(name, role, prompt string) {
 				return
 			}
 
-			for _, item := range resp.Output {
-				if item.Type == "message" {
-					input = append(input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
-				}
-			}
-
 			hasFuncCalls := false
 			for _, item := range resp.Output {
-				if item.Type == "function_call" {
+				switch item.Type {
+				case "message":
+					input = append(input, InputItem{Type: "message", Role: "assistant", Content: item.Content})
+				case "function_call":
 					hasFuncCalls = true
-					break
+					input = append(input, InputItem{
+						Type: "function_call", CallID: item.CallID,
+						Name: item.Name, Arguments: item.Arguments, Status: item.Status,
+					})
 				}
 			}
 			if !hasFuncCalls {
