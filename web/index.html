@@ -202,8 +202,8 @@ body {
   border-radius: 3px;
 }
 
-/* 工具调用（使用原生 details/summary） */
-details.tool-block {
+/* 工具调用 */
+.tool-block {
   align-self: flex-start;
   max-width: 85%;
   background: var(--bg-tool);
@@ -214,7 +214,7 @@ details.tool-block {
   animation: fadeIn 0.2s ease;
 }
 
-details.tool-block summary {
+.tool-header {
   padding: 8px 12px;
   display: flex;
   align-items: center;
@@ -224,24 +224,22 @@ details.tool-block summary {
   font-family: 'JetBrains Mono', monospace;
   cursor: pointer;
   user-select: none;
-  list-style: none;
   transition: color 0.15s;
 }
 
-details.tool-block summary::-webkit-details-marker { display: none; }
-details.tool-block summary:hover { color: var(--text); }
-details.tool-block summary .icon { font-size: 14px; }
+.tool-header:hover { color: var(--text); }
+.tool-header .icon { font-size: 14px; }
 
-details.tool-block summary .arrow {
+.tool-header .arrow {
   margin-left: auto;
   font-size: 10px;
   transition: transform 0.2s;
   color: var(--text-dim);
 }
 
-details.tool-block[open] summary .arrow { transform: rotate(90deg); }
+.tool-header.expanded .arrow { transform: rotate(90deg); }
 
-details.tool-block .tool-body {
+.tool-body {
   padding: 10px 12px;
   font-family: 'JetBrains Mono', monospace;
   color: var(--text-dim);
@@ -250,7 +248,10 @@ details.tool-block .tool-body {
   white-space: pre-wrap;
   word-break: break-all;
   border-top: 1px solid var(--border);
+  display: none;
 }
+
+.tool-body.show { display: block; }
 
 /* 思考状态 */
 .thinking {
@@ -446,35 +447,26 @@ function renderMsg(m) {
     case 'message':
       return `<div class="msg ai">${formatText(m.text)}</div>`;
     case 'thinking':
-      return `<details class="tool-block">
-        <summary style="color:var(--text-dim)">
-          <span class="icon">💭</span> ${escHtml(m.step || '思考中')}
-          <span class="arrow">▶</span>
-        </summary>
-        <div class="tool-body">${escHtml(m.detail || '')}</div>
-      </details>`;
+      return `<div class="tool-block"><div class="tool-header" data-toggle style="color:var(--text-dim)"><span class="icon">💭</span> ${escHtml(m.step || '思考中')}<span class="arrow">▶</span></div><div class="tool-body">${escHtml(m.detail || '')}</div></div>`;
     case 'tool_call':
-      return `<details class="tool-block">
-        <summary>
-          <span class="icon">🔧</span> ${escHtml(m.name)}
-          <span class="arrow">▶</span>
-        </summary>
-        <div class="tool-body">${escHtml(typeof m.args === 'string' ? m.args : JSON.stringify(m.args, null, 2))}</div>
-      </details>`;
+      return `<div class="tool-block"><div class="tool-header" data-toggle><span class="icon">🔧</span> ${escHtml(m.name)}<span class="arrow">▶</span></div><div class="tool-body">${escHtml(typeof m.args === 'string' ? m.args : JSON.stringify(m.args, null, 2))}</div></div>`;
     case 'tool_result':
-      return `<details class="tool-block">
-        <summary style="color:var(--green)">
-          <span class="icon">✅</span> ${escHtml(m.name)} 结果
-          <span class="arrow">▶</span>
-        </summary>
-        <div class="tool-body">${escHtml(m.result)}</div>
-      </details>`;
+      return `<div class="tool-block"><div class="tool-header" data-toggle style="color:var(--green)"><span class="icon">✅</span> ${escHtml(m.name)} 结果<span class="arrow">▶</span></div><div class="tool-body">${escHtml(m.result)}</div></div>`;
     case 'error':
       return `<div class="msg ai" style="border-color:var(--red);color:var(--red)">❌ ${escHtml(m.text)}</div>`;
     default:
       return '';
   }
 }
+
+// 事件委托：点击 tool-header 展开/收起（监听在父容器上，不受 innerHTML 重建影响）
+document.getElementById('messages').addEventListener('click', function(e) {
+  const header = e.target.closest('[data-toggle]');
+  if (!header) return;
+  header.classList.toggle('expanded');
+  const body = header.nextElementSibling;
+  if (body) body.classList.toggle('show');
+});
 
 function formatText(text) {
   // 简单 markdown: 代码块、行内代码、换行
